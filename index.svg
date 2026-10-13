@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xhtml="http://www.w3.org/1999/xhtml"
+     width="1200" height="800"
+     viewBox="0 0 1200 800">
+  <foreignObject x="0" y="0" width="100%" height="100%">
+    <div xmlns="http://www.w3.org/1999/xhtml"><style>
+:root{color-scheme:dark;--bg:#0b0d12;--panel:#151923;--line:#292f3d;--text:#f4f6fb;--muted:#a0a9ba;--accent:#7888ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,sans-serif}
+header{padding:22px max(16px,4vw);border-bottom:1px solid var(--line);background:#10131a}h1{margin:0;font-size:24px}header p{margin:5px 0 0;color:var(--muted)}
+main{padding:22px max(16px,4vw)}.toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+input,button{font:inherit;border-radius:9px;padding:10px 12px;border:1px solid var(--line)}input{flex:1;min-width:190px;background:var(--panel);color:var(--text)}
+button{background:var(--accent);border-color:var(--accent);color:white;font-weight:650;cursor:pointer}button.secondary{background:var(--panel);border-color:var(--line)}button:disabled{opacity:.55;cursor:wait}
+#status{color:var(--muted);margin:12px 0 18px;overflow-wrap:anywhere}#games{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}
+.game{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;min-width:0}.cover{width:100%;aspect-ratio:16/10;object-fit:cover;background:#222838;display:block}.no-cover{aspect-ratio:16/10;display:grid;place-items:center;background:#222838;color:#9da8c2;font-size:28px}
+.info{padding:11px;display:flex;flex-direction:column;gap:8px;min-height:125px}.info h2{font-size:14px;line-height:1.4;margin:0;overflow-wrap:anywhere}.source{font-size:12px;color:var(--muted);overflow-wrap:anywhere}.actions{display:flex;gap:7px;margin-top:auto}.actions button{flex:1;padding:8px 5px;font-size:13px}
+#empty{display:none;text-align:center;color:var(--muted);padding:28px}#player{display:none;margin:0 0 22px;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:#000}
+.playerbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;background:var(--panel)}.playerbar h2{font-size:15px;margin:0}.playerbar div{display:flex;gap:8px}iframe{display:block;width:100%;height:min(72vh,760px);min-height:350px;border:0;background:#000}
+footer{padding:20px;text-align:center;color:var(--muted);font-size:12px}@media(max-width:450px){#games{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.info{padding:8px}iframe{min-height:300px}}
+</style>
+<header><h1>Game Fetcher</h1><p>All available games from your API, in one searchable library.</p></header>
+<main>
+  <div class="toolbar">
+    <input id="search" type="search" placeholder="Search all games..." autocomplete="off" aria-label="Search all games" />
+    <button id="reload" class="secondary">Reload all games</button>
+  </div>
+  <section id="player">
+    <div class="playerbar"><h2 id="playing-title">Now playing</h2><div>
+      <button id="open-tab" class="secondary">Open tab</button><button id="close">Close</button>
+    </div></div>
+    <iframe id="frame" title="Game player" allow="fullscreen; autoplay; gamepad" allowfullscreen=""></iframe>
+  </section>
+  <div id="status" role="status">Connecting to your API…</div>
+  <section id="games" aria-label="All games"></section>
+  <div id="empty">No games match your search.</div>
+</main>
+<footer>If a game host blocks embedding, use its Open link button. Games that are missing from the API cannot be displayed here until that source is fixed.</footer>
+<script>
+"use strict";
+const API = "https://shrill-fire-ad73.wasubanli356.workers.dev/api/games";
+const PAGE_SIZE = 500;
+const $ = id =&gt; document.getElementById(id);
+let games = [], activeUrl = "", controller = null;
+
+function safeHttpURL(value) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  try { const u = new URL(value); return /^https?:$/.test(u.protocol) ? u.href : ""; }
+  catch { return ""; }
+}
+function unpack(payload) {
+  const rows = Array.isArray(payload) ? payload : payload?.games;
+  if (!Array.isArray(rows)) throw new Error("API response does not contain a games array");
+  return rows.map((g, i) =&gt; ({
+    id: String(g.id ?? `${g.source ?? "game"}-${i}`),
+    title: String(g.title ?? g.name ?? "Untitled game"),
+    url: safeHttpURL(g.url ?? g.gameUrl ?? g.href ?? g.link),
+    thumbnail: safeHttpURL(g.thumbnail ?? g.image ?? g.cover ?? g.icon ?? g.thumb),
+    source: String(g.source ?? "Unknown source")
+  })).filter(g =&gt; g.url);
+}
+async function getPage(page, signal) {
+  const url = new URL(API);
+  url.searchParams.set("limit", String(PAGE_SIZE));
+  url.searchParams.set("page", String(page));
+  const response = await fetch(url.href, {headers:{Accept:"application/json"}, cache:"no-store", signal});
+  if (!response.ok) throw new Error(`API returned HTTP ${response.status} on page ${page}`);
+  return response.json();
+}
+async function fetchAllGames() {
+  if (controller) controller.abort();
+  controller = new AbortController();
+  const signal = controller.signal;
+  const reload = $("reload");
+  reload.disabled = true;
+  $("status").textContent = "Fetching the full catalog from all API pages…";
+  $("games").replaceChildren(); $("empty").style.display = "none";
+  try {
+    const first = await getPage(1, signal);
+    let combined = unpack(first);
+    const total = Number(first?.total);
+    const pageSize = Number(first?.limit) || PAGE_SIZE;
+    let totalPages = Number(first?.totalPages);
+    if (!Number.isFinite(totalPages) || totalPages &lt; 1) {
+      totalPages = Number.isFinite(total) &amp;&amp; total &gt; combined.length
+        ? Math.ceil(total / pageSize) : 1;
+    }
+    // If the API ignores pagination and already returns the entire catalog, don't refetch it.
+    if (Number.isFinite(total) &amp;&amp; combined.length &gt;= total) totalPages = 1;
+    if (totalPages &gt; 1) {
+      let completed = 1;
+      for (let start = 2; start &lt;= totalPages; start += 4) {
+        const batchPages = [];
+        for (let p = start; p &lt; Math.min(start + 4, totalPages + 1); p++) batchPages.push(p);
+        const batch = await Promise.all(batchPages.map(p =&gt; getPage(p, signal)));
+        for (const payload of batch) combined.push(...unpack(payload));
+        completed += batch.length;
+        $("status").textContent = `Fetching all games… ${Math.min(completed * pageSize, total || combined.length).toLocaleString()} loaded`;
+      }
+    }
+    // Preserve the same game URL when it appears in different sources; only remove exact duplicates.
+    const seen = new Set();
+    games = combined.filter(game =&gt; {
+      const key = `${game.source}|${game.url}`;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+    render();
+    const failed = Array.isArray(first?.failedSources) ? first.failedSources.length : 0;
+    const totalText = Number.isFinite(total) ? ` API reports ${total.toLocaleString()} entries.` : "";
+    const failedText = failed ? ` ${failed} source(s) failed on the API; those games cannot be fetched until the Worker source errors are fixed.` : "";
+    $("status").textContent = `Loaded ${games.length.toLocaleString()} games across all returned sources.${totalText}${failedText}`;
+  } catch (error) {
+    if (error.name !== "AbortError") $("status").textContent = `Could not load the full catalog: ${error.message}. Check the Worker API and CORS settings.`;
+  } finally {
+    reload.disabled = false;
+    if (controller?.signal === signal) controller = null;
+  }
+}
+function render() {
+  const q = $("search").value.trim().toLowerCase();
+  const shown = games.filter(g =&gt; !q || g.title.toLowerCase().includes(q) || g.source.toLowerCase().includes(q));
+  const frag = document.createDocumentFragment();
+  for (const game of shown) {
+    const card = document.createElement("article"); card.className = "game";
+    if (game.thumbnail) {
+      const img = document.createElement("img"); img.className = "cover"; img.src = game.thumbnail; img.alt = ""; img.loading = "lazy"; img.referrerPolicy = "no-referrer";
+      img.onerror = () =&gt; { const p = document.createElement("div"); p.className = "no-cover"; p.textContent = "▣"; img.replaceWith(p); };
+      card.append(img);
+    } else { const p = document.createElement("div"); p.className = "no-cover"; p.textContent = "▣"; card.append(p); }
+    const info = document.createElement("div"); info.className = "info";
+    const title = document.createElement("h2"); title.textContent = game.title;
+    const source = document.createElement("div"); source.className = "source"; source.textContent = game.source;
+    const actions = document.createElement("div"); actions.className = "actions";
+    const play = document.createElement("button"); play.textContent = "Play"; play.addEventListener("click", () =&gt; playGame(game));
+    const open = document.createElement("button"); open.className = "secondary"; open.textContent = "Open link"; open.addEventListener("click", () =&gt; window.open(game.url, "_blank", "noopener,noreferrer"));
+    actions.append(play, open); info.append(title, source, actions); card.append(info); frag.append(card);
+  }
+  $("games").replaceChildren(frag); $("empty").style.display = shown.length ? "none" : "block";
+}
+function playGame(game) {
+  activeUrl = game.url; $("playing-title").textContent = game.title; $("frame").src = game.url; $("player").style.display = "block";
+  $("player").scrollIntoView({behavior:"smooth", block:"start"});
+}
+function closeGame() { $("frame").src = "about:blank"; $("player").style.display = "none"; activeUrl = ""; }
+$("search").addEventListener("input", render);
+$("reload").addEventListener("click", fetchAllGames);
+$("close").addEventListener("click", closeGame);
+$("open-tab").addEventListener("click", () =&gt; { if (activeUrl) window.open(activeUrl, "_blank", "noopener,noreferrer"); });
+fetchAllGames();
+</script>
+
+
+</div>
+  </foreignObject>
+</svg>
